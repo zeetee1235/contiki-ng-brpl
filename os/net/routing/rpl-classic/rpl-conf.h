@@ -93,6 +93,35 @@
 #define RPL_CONF_STATS 0
 #endif /* RPL_CONF_STATS */
 
+/* BRPL support */
+#ifndef BRPL_CONF_ENABLE
+#if defined(RPL_CONF_OF_OCP) && (RPL_CONF_OF_OCP == RPL_OCP_BRPL)
+#define BRPL_CONF_ENABLE 1
+#else
+#define BRPL_CONF_ENABLE 0
+#endif
+#endif
+
+#ifndef BRPL_CONF_QUEUE_MAX
+#define BRPL_CONF_QUEUE_MAX 200
+#endif
+
+#ifndef BRPL_CONF_QUEUE_EWMA_ALPHA
+#define BRPL_CONF_QUEUE_EWMA_ALPHA 125 /* scale 0-1000 */
+#endif
+
+#ifndef BRPL_CONF_BETA_WINDOW_SECONDS
+#define BRPL_CONF_BETA_WINDOW_SECONDS 60
+#endif
+
+#ifndef BRPL_CONF_LIFO_QUEUE
+#define BRPL_CONF_LIFO_QUEUE 1
+#endif
+
+#ifndef BRPL_CONF_QUEUE_OPTION_CODE
+#define BRPL_CONF_QUEUE_OPTION_CODE 0xCE
+#endif
+
 /*
  * The objective function (OF) used by a RPL root is configurable through
  * the RPL_CONF_OF_OCP parameter. This is defined as the objective code

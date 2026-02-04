@@ -87,6 +87,7 @@ typedef uint16_t rpl_ocp_t;
 /* IANA Objective Code Point as defined in RFC6550. */
 #define RPL_OCP_OF0     0
 #define RPL_OCP_MRHOF   1
+#define RPL_OCP_BRPL    2
 
 struct rpl_metric_object_energy {
   uint8_t flags;
@@ -121,6 +122,11 @@ struct rpl_parent {
   rpl_rank_t rank;
   uint8_t dtsn;
   uint8_t flags;
+#if BRPL_CONF_ENABLE
+  uint16_t brpl_queue;
+  uint16_t brpl_queue_max;
+  uint8_t brpl_queue_valid;
+#endif
 };
 typedef struct rpl_parent rpl_parent_t;
 /*---------------------------------------------------------------------------*/
@@ -149,6 +155,14 @@ struct rpl_dag {
   struct rpl_instance *instance;
   rpl_prefix_t prefix_info;
   uint32_t lifetime;
+#if BRPL_CONF_ENABLE
+  uint16_t brpl_theta; /* scaled by 1000 */
+  uint16_t brpl_beta;  /* scaled by 1000 */
+  uint16_t brpl_q_avg; /* EWMA queue length (packets) */
+  uint32_t brpl_pmax;  /* max p_tilde among neighbors */
+  uint32_t brpl_last_beta_update;
+  uint16_t brpl_last_nbr_count;
+#endif
 };
 typedef struct rpl_dag rpl_dag_t;
 typedef struct rpl_instance rpl_instance_t;

@@ -1262,6 +1262,15 @@ rpl_add_dag(uip_ipaddr_t *from, rpl_dio_t *dio)
     }
   }
   p->rank = dio->rank;
+#if BRPL_CONF_ENABLE
+  if(dio->brpl_queue_valid) {
+    p->brpl_queue = dio->brpl_queue;
+    p->brpl_queue_max = dio->brpl_queue_max;
+    p->brpl_queue_valid = 1;
+  } else {
+    p->brpl_queue_valid = 0;
+  }
+#endif
 
   /* Determine the objective function by using the objective code
      point of the DIO. */
