@@ -9,6 +9,8 @@
 #include "net/linkaddr.h"
 
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 
 #define BRPL_SCALE 1000
 
@@ -16,6 +18,83 @@
 
 extern rpl_of_t rpl_mrhof;
 NBR_TABLE_DECLARE(rpl_parents);
+
+#ifndef TRUST_SCALE
+#define TRUST_SCALE 1000
+#endif
+#ifndef TRUST_MIN
+#define TRUST_MIN 300
+#endif
+#ifndef TRUST_PENALTY_GAMMA
+#define TRUST_PENALTY_GAMMA 1
+#endif
+
+__attribute__((weak)) uint16_t brpl_trust_get(uint16_t node_id)
+{
+  (void)node_id;
+  return TRUST_SCALE;
+}
+
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+#if defined(CSV_LOG_SAMPLE_RATE)
+#define BRPL_LOG_SAMPLE_RATE CSV_LOG_SAMPLE_RATE
+#else
+#define BRPL_LOG_SAMPLE_RATE 1
+#endif
+
+static uint32_t brpl_log_counter;
+
+static int
+brpl_should_log(void)
+{
+  brpl_log_counter++;
+  if(BRPL_LOG_SAMPLE_RATE == 0) {
+    return 0;
+  }
+  return (brpl_log_counter % BRPL_LOG_SAMPLE_RATE) == 0;
+}
+#endif
+
+static uint16_t
+brpl_self_id(void)
+{
+  return (uint16_t)linkaddr_node_addr.u8[LINKADDR_SIZE - 1];
+}
+
+static uint16_t
+brpl_parent_id(rpl_parent_t *p)
+{
+  const linkaddr_t *lladdr = rpl_get_parent_lladdr(p);
+  if(lladdr == NULL) {
+    return 0xFFFF;
+  }
+  return (uint16_t)lladdr->u8[LINKADDR_SIZE - 1];
+}
+
+static uint16_t
+brpl_trust_clamped(rpl_parent_t *p)
+{
+  uint16_t trust = brpl_trust_get(brpl_parent_id(p));
+  if(trust < TRUST_MIN) {
+    trust = TRUST_MIN;
+  }
+  return trust;
+}
+
+static int32_t
+brpl_apply_trust_penalty(int32_t weight, rpl_parent_t *p)
+{
+  uint16_t trust = brpl_trust_clamped(p);
+#if TRUST_PENALTY_GAMMA >= 2
+  int64_t num = (int64_t)weight * trust * trust;
+  int64_t den = (int64_t)TRUST_SCALE * TRUST_SCALE;
+  return (int32_t)(num / den);
+#else
+  int64_t num = (int64_t)weight * trust;
+  int64_t den = (int64_t)TRUST_SCALE;
+  return (int32_t)(num / den);
+#endif
+}
 
 static uint16_t
 brpl_scale_ratio(uint32_t num, uint32_t den)
@@ -106,6 +185,19 @@ brpl_update_state(rpl_dag_t *dag)
       }
     }
   }
+
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+  if(brpl_should_log()) {
+    printf("CSV,BRPL_STATE,%u,%u,%u,%u,%u,%u,%lu\n",
+           (unsigned)brpl_self_id(),
+           (unsigned)qx,
+           (unsigned)qmax,
+           (unsigned)dag->brpl_q_avg,
+           (unsigned)rho,
+           (unsigned)dag->brpl_theta,
+           (unsigned long)dag->brpl_pmax);
+  }
+#endif
 }
 
 static uint16_t
@@ -141,7 +233,38 @@ brpl_weight(rpl_parent_t *p)
 
   int32_t theta = dag->brpl_theta;
   int32_t weight = (theta * (int32_t)p_norm - (BRPL_SCALE - theta) * dq_norm) / BRPL_SCALE;
-  return weight;
+  int32_t weight_trust = brpl_apply_trust_penalty(weight, p);
+
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+  if(brpl_should_log()) {
+    uint16_t link_metric = rpl_get_parent_link_metric(p);
+    printf("CSV,BRPL_METRIC,%u,%u,%u,%u,%lu\n",
+           (unsigned)brpl_self_id(),
+           (unsigned)brpl_parent_id(p),
+           (unsigned)link_metric,
+           (unsigned)p->rank,
+           (unsigned long)p_tilde);
+    printf("CSV,BRPL_WEIGHT,%u,%u,%u,%u,%u,%lu,%u,%ld,%ld,%ld\n",
+           (unsigned)brpl_self_id(),
+           (unsigned)brpl_parent_id(p),
+           (unsigned)qx,
+           (unsigned)qy,
+           (unsigned)qmax,
+           (unsigned long)p_tilde,
+           (unsigned)p_norm,
+           (long)dq_norm,
+           (long)theta,
+           (long)weight);
+    printf("CSV,BRPL_TRUST,%u,%u,%u,%u,%u,%ld\n",
+           (unsigned)brpl_self_id(),
+           (unsigned)brpl_parent_id(p),
+           (unsigned)brpl_trust_clamped(p),
+           (unsigned)TRUST_MIN,
+           (unsigned)TRUST_PENALTY_GAMMA,
+           (long)weight_trust);
+  }
+#endif
+  return weight_trust;
 }
 
 static rpl_parent_t *
@@ -155,7 +278,19 @@ brpl_best_parent(rpl_parent_t *p1, rpl_parent_t *p2)
   }
   int32_t w1 = brpl_weight(p1);
   int32_t w2 = brpl_weight(p2);
-  return (w2 < w1) ? p2 : p1;
+  rpl_parent_t *best = (w2 < w1) ? p2 : p1;
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+  if(brpl_should_log()) {
+    printf("CSV,BRPL_BEST,%u,%u,%ld,%u,%ld,%u\n",
+           (unsigned)brpl_self_id(),
+           (unsigned)brpl_parent_id(p1),
+           (long)w1,
+           (unsigned)brpl_parent_id(p2),
+           (long)w2,
+           (unsigned)brpl_parent_id(best));
+  }
+#endif
+  return best;
 }
 
 static void
