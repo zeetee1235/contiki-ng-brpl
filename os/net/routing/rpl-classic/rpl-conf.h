@@ -122,6 +122,50 @@
 #define BRPL_CONF_QUEUE_OPTION_CODE 0xCE
 #endif
 
+/* Trust-aware routing parameters */
+#ifndef BRPL_CONF_TRUST_ENABLE
+#define BRPL_CONF_TRUST_ENABLE 1
+#endif
+
+/* Sinkhole trust - Advertisement plausibility */
+#ifndef BRPL_CONF_LAMBDA_SH_ADV
+#define BRPL_CONF_LAMBDA_SH_ADV 2 /* Sensitivity to rank anomalies (scaled by 1000: 0.002) */
+#endif
+
+#ifndef BRPL_CONF_TAU_RANK
+#define BRPL_CONF_TAU_RANK 256 /* Rank jitter tolerance (1 hop worth) */
+#endif
+
+/* Sinkhole trust - Stability */
+#ifndef BRPL_CONF_LAMBDA_SH_STAB
+#define BRPL_CONF_LAMBDA_SH_STAB 3 /* Sensitivity to rank instability (scaled by 1000: 0.003) */
+#endif
+
+#ifndef BRPL_CONF_KAPPA_RANK
+#define BRPL_CONF_KAPPA_RANK 512 /* Acceptable rank increase threshold */
+#endif
+
+#ifndef BRPL_CONF_STABILITY_WINDOW
+#define BRPL_CONF_STABILITY_WINDOW 30 /* Seconds to track rank stability */
+#endif
+
+/* Trust combination weights */
+#ifndef BRPL_CONF_TRUST_BETA
+#define BRPL_CONF_TRUST_BETA 200 /* EWMA smoothing for trust (0-1000, default 0.2) */
+#endif
+
+#ifndef BRPL_CONF_TRUST_ALPHA
+#define BRPL_CONF_TRUST_ALPHA 500 /* Weight for grayhole vs sinkhole (0-1000, 0.5 = equal) */
+#endif
+
+#ifndef BRPL_CONF_TRUST_GAMMA
+#define BRPL_CONF_TRUST_GAMMA 2000 /* Penalty exponent (scaled by 1000, default 2.0) */
+#endif
+
+#ifndef BRPL_CONF_TRUST_LAMBDA_PENALTY
+#define BRPL_CONF_TRUST_LAMBDA_PENALTY 1000 /* Penalty weight in final metric (scaled by 1000) */
+#endif
+
 /*
  * The objective function (OF) used by a RPL root is configurable through
  * the RPL_CONF_OF_OCP parameter. This is defined as the objective code

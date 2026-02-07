@@ -410,6 +410,9 @@ rpl_set_root(uint8_t instance_id, uip_ipaddr_t *dag_id)
     for(i = 0; i < RPL_MAX_DAG_PER_INSTANCE; ++i) {
       dag = &instance->dag_table[i];
       if(dag->used) {
+        if(dag->instance == NULL) {
+          continue;
+        }
         if(uip_ipaddr_cmp(&dag->dag_id, dag_id)) {
           version = dag->version;
           RPL_LOLLIPOP_INCREMENT(version);
@@ -475,7 +478,9 @@ rpl_set_root(uint8_t instance_id, uip_ipaddr_t *dag_id)
 
   instance->current_dag = dag;
   instance->dtsn_out = RPL_LOLLIPOP_INIT;
-  instance->of->update_metric_container(instance);
+  if(instance->of->update_metric_container) {
+    instance->of->update_metric_container(instance);
+  }
   default_instance = instance;
 
   LOG_INFO("Node set to be a DAG root with DAG ID ");
@@ -759,6 +764,17 @@ rpl_add_parent(rpl_dag_t *dag, rpl_dio_t *dio, uip_ipaddr_t *addr)
 #if RPL_WITH_MC
       memcpy(&p->mc, &dio->mc, sizeof(p->mc));
 #endif /* RPL_WITH_MC */
+#if BRPL_CONF_ENABLE && BRPL_CONF_TRUST_ENABLE
+      /* Initialize trust values for new parent */
+      p->trust_gray = 1000;
+      p->trust_sink_adv = 1000;
+      p->trust_sink_stab = 1000;
+      p->trust_total = 1000;
+      p->last_rank = dio->rank;
+      p->last_rank_update = clock_seconds();
+      p->packets_sent = 0;
+      p->packets_dropped = 0;
+#endif
     }
   }
 
@@ -860,7 +876,9 @@ rpl_select_dag(rpl_instance_t *instance, rpl_parent_t *p)
     instance->current_dag = best_dag;
   }
 
-  instance->of->update_metric_container(instance);
+  if(instance->of->update_metric_container) {
+    instance->of->update_metric_container(instance);
+  }
   /* Update the DAG rank. */
   best_dag->rank = rpl_rank_via_parent(best_dag->preferred_parent);
   if(last_parent == NULL || best_dag->rank < best_dag->min_rank) {
@@ -1074,10 +1092,14 @@ rpl_get_any_dag_with_parent(bool requires_parent)
   int i;
 
   for(i = 0; i < RPL_MAX_INSTANCES; ++i) {
-    if(instance_table[i].used
-       && instance_table[i].current_dag->joined
-       && (!requires_parent || instance_table[i].current_dag->preferred_parent != NULL)) {
-      return instance_table[i].current_dag;
+    if(instance_table[i].used) {
+      rpl_dag_t *dag = instance_table[i].current_dag;
+      if(dag == NULL) {
+        continue;
+      }
+      if(dag->joined && (!requires_parent || dag->preferred_parent != NULL)) {
+        return dag;
+      }
     }
   }
   return NULL;
@@ -1236,7 +1258,9 @@ rpl_join_instance(uip_ipaddr_t *from, rpl_dio_t *dio)
   memcpy(&dag->prefix_info, &dio->prefix_info, sizeof(rpl_prefix_t));
 
   rpl_set_preferred_parent(dag, p);
-  instance->of->update_metric_container(instance);
+  if(instance->of->update_metric_container) {
+    instance->of->update_metric_container(instance);
+  }
   dag->rank = rpl_rank_via_parent(p);
   /* So far this is the lowest rank we are aware of. */
   dag->min_rank = dag->rank;
@@ -1308,6 +1332,11 @@ rpl_add_dag(uip_ipaddr_t *from, rpl_dio_t *dio)
   } else {
     p->brpl_queue_valid = 0;
   }
+  
+#if BRPL_CONF_TRUST_ENABLE
+  /* Update trust metrics when receiving DIO */
+  brpl_update_parent_trust(p, dag);
+#endif
 
 #if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
   if(rpl_should_log()) {

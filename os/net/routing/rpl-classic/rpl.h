@@ -126,6 +126,18 @@ struct rpl_parent {
   uint16_t brpl_queue;
   uint16_t brpl_queue_max;
   uint8_t brpl_queue_valid;
+  
+  /* Trust values (scaled by 1000) */
+  uint16_t trust_gray;         /* Grayhole trust (data-plane) */
+  uint16_t trust_sink_adv;     /* Sinkhole advertisement trust */
+  uint16_t trust_sink_stab;    /* Sinkhole stability trust */
+  uint16_t trust_total;        /* Combined total trust */
+  
+  /* Trust computation state */
+  rpl_rank_t last_rank;        /* For stability tracking */
+  uint32_t last_rank_update;   /* Timestamp of rank update */
+  uint32_t packets_sent;       /* For grayhole detection */
+  uint32_t packets_dropped;    /* For grayhole detection */
 #endif
 };
 typedef struct rpl_parent rpl_parent_t;
@@ -354,6 +366,17 @@ enum rpl_mode rpl_get_mode(void);
  * \retval 1 if we have joined a network, 0 if not.
  */
 int rpl_has_joined(void);
+
+#if BRPL_CONF_ENABLE && BRPL_CONF_TRUST_ENABLE
+/**
+ * Update trust metrics for a parent based on current observations.
+ * Should be called periodically or when receiving DIOs.
+ *
+ * \param p The parent to update trust for
+ * \param dag The DAG the parent belongs to
+ */
+void brpl_update_parent_trust(rpl_parent_t *p, rpl_dag_t *dag);
+#endif
 
 /**
  * Get the RPL's best guess on if we have downward route or not.
