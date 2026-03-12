@@ -245,6 +245,11 @@ struct rpl_dio {
   rpl_prefix_t destination_prefix;
   rpl_prefix_t prefix_info;
   struct rpl_metric_container mc;
+#if BRPL_CONF_ENABLE
+  uint16_t brpl_queue;
+  uint16_t brpl_queue_max;
+  uint8_t brpl_queue_valid;
+#endif
 };
 typedef struct rpl_dio rpl_dio_t;
 

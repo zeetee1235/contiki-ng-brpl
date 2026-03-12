@@ -47,6 +47,7 @@
 #include "net/ipv6/uip-icmp6.h"
 #include "net/routing/routing.h"
 #include "net/routing/rpl-classic/rpl-private.h"
+#include "net/routing/rpl-classic/brpl-queue.h"
 #include "net/routing/rpl-classic/rpl-dag-root.h"
 #include "net/ipv6/multicast/uip-mcast6.h"
 
@@ -355,6 +356,9 @@ init(void)
   default_instance = NULL;
 
   rpl_dag_init();
+#if BRPL_CONF_ENABLE
+  brpl_queue_init(BRPL_CONF_QUEUE_MAX);
+#endif
   rpl_reset_periodic_timer();
   rpl_icmp6_register_handlers();
 

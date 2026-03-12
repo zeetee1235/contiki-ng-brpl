@@ -49,6 +49,7 @@
 #include "net/ipv6/uip-sr.h"
 #include "net/ipv6/uip-icmp6.h"
 #include "net/routing/rpl-classic/rpl-private.h"
+#include "net/routing/rpl-classic/brpl-queue.h"
 #include "net/packetbuf.h"
 #include "net/ipv6/multicast/uip-mcast6.h"
 #include "lib/random.h"
@@ -301,6 +302,9 @@ dio_input(void)
   dio.ocp = RPL_OF_OCP;
   dio.default_lifetime = RPL_DEFAULT_LIFETIME;
   dio.lifetime_unit = RPL_DEFAULT_LIFETIME_UNIT;
+#if BRPL_CONF_ENABLE
+  dio.brpl_queue_valid = 0;
+#endif
 
   uip_ipaddr_copy(&from, &UIP_IP_BUF->srcipaddr);
 
@@ -485,6 +489,17 @@ dio_input(void)
       LOG_INFO("Copying prefix information\n");
       memcpy(&dio.prefix_info.prefix, &buffer[i + 16], 16);
       break;
+#if BRPL_CONF_ENABLE
+    case BRPL_CONF_QUEUE_OPTION_CODE:
+      if(len != 6) {
+        LOG_WARN("Invalid BRPL queue option, len = %d\n", len);
+        goto discard;
+      }
+      dio.brpl_queue = get16(buffer, i + 2);
+      dio.brpl_queue_max = get16(buffer, i + 4);
+      dio.brpl_queue_valid = 1;
+      break;
+#endif
     default:
       LOG_WARN("Unsupported suboption type in DIO: %u\n",
                (unsigned)subopt_type);
@@ -608,6 +623,15 @@ dio_output(rpl_instance_t *instance, uip_ipaddr_t *uc_addr)
   buffer[pos++] = instance->default_lifetime;
   set16(buffer, pos, instance->lifetime_unit);
   pos += 2;
+
+#if BRPL_CONF_ENABLE
+  buffer[pos++] = BRPL_CONF_QUEUE_OPTION_CODE;
+  buffer[pos++] = 4;
+  set16(buffer, pos, brpl_queue_length());
+  pos += 2;
+  set16(buffer, pos, brpl_queue_max());
+  pos += 2;
+#endif
 
   /* Check if we have a prefix to send also. */
   if(dag->prefix_info.length > 0) {

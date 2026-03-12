@@ -94,8 +94,11 @@ brpl_update_state(rpl_dag_t *dag)
     dag->brpl_last_beta_update = now;
   }
 
-  uint16_t theta_part = (uint16_t)((BRPL_SCALE - dag->brpl_beta) * (BRPL_SCALE - rho) / BRPL_SCALE);
-  dag->brpl_theta = (uint16_t)(dag->brpl_beta + theta_part);
+  /*
+   * QuickTheta: increase BP weight as local backlog grows.
+   * theta = Qx / Qmax, scaled by BRPL_SCALE.
+   */
+  dag->brpl_theta = rho;
 
   dag->brpl_pmax = 1;
   for(rpl_parent_t *p = nbr_table_head(rpl_parents); p != NULL; p = nbr_table_next(rpl_parents, p)) {
@@ -135,12 +138,9 @@ brpl_weight(rpl_parent_t *p)
   uint16_t qy = brpl_neighbor_queue(p, dag, qx, qmax);
   int32_t delta_q = (int32_t)qx - (int32_t)qy;
 
-  uint32_t p_tilde = (uint32_t)rpl_get_parent_link_metric(p) + (uint32_t)p->rank;
-  uint16_t p_norm = brpl_scale_ratio(p_tilde, dag->brpl_pmax);
-  int32_t dq_norm = qmax > 0 ? (delta_q * BRPL_SCALE) / (int32_t)qmax : 0;
-
+  int32_t etx = (int32_t)rpl_get_parent_link_metric(p);
   int32_t theta = dag->brpl_theta;
-  int32_t weight = (theta * (int32_t)p_norm - (BRPL_SCALE - theta) * dq_norm) / BRPL_SCALE;
+  int32_t weight = (theta * delta_q - (BRPL_SCALE - theta) * etx) / BRPL_SCALE;
   return weight;
 }
 
@@ -155,7 +155,13 @@ brpl_best_parent(rpl_parent_t *p1, rpl_parent_t *p2)
   }
   int32_t w1 = brpl_weight(p1);
   int32_t w2 = brpl_weight(p2);
-  return (w2 < w1) ? p2 : p1;
+
+  /* BRPL parent selection: argmax W */
+  if(w2 > w1) {
+    return w2 > 0 ? p2 : NULL;
+  }
+
+  return w1 > 0 ? p1 : NULL;
 }
 
 static void
