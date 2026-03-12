@@ -1,5 +1,7 @@
 #include "net/ipv6/uip-packetqueue.h"
 #include "lib/memb.h"
+#include "net/routing/rpl-classic/rpl-conf.h"
+#include "net/routing/rpl-classic/brpl-queue.h"
 #include <stdio.h>
 
 #define MAX_NUM_QUEUED_PACKETS 2
@@ -18,6 +20,10 @@ packet_timedout(void *ptr)
   LOG_INFO("Timed out %p\n", h);
   memb_free(&packets_memb, h->packet);
   h->packet = NULL;
+#if BRPL_CONF_ENABLE
+  brpl_queue_on_drop();
+  brpl_queue_on_dequeue();
+#endif
 }
 /*---------------------------------------------------------------------------*/
 void
@@ -40,8 +46,14 @@ uip_packetqueue_alloc(struct uip_packetqueue_handle *handle,
   if(handle->packet != NULL) {
     ctimer_set(&handle->packet->lifetimer, lifetime,
                packet_timedout, handle);
+#if BRPL_CONF_ENABLE
+    brpl_queue_on_enqueue();
+#endif
   } else {
     LOG_ERR("Alloc failed\n");
+#if BRPL_CONF_ENABLE
+    brpl_queue_on_drop();
+#endif
   }
   return handle->packet;
 }
@@ -54,6 +66,9 @@ uip_packetqueue_free(struct uip_packetqueue_handle *handle)
     ctimer_stop(&handle->packet->lifetimer);
     memb_free(&packets_memb, handle->packet);
     handle->packet = NULL;
+#if BRPL_CONF_ENABLE
+    brpl_queue_on_dequeue();
+#endif
   }
 }
 /*---------------------------------------------------------------------------*/
