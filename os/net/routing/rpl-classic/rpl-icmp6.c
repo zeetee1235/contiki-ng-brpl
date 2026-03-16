@@ -82,6 +82,20 @@
 #define ATTACK_MODE_SINKHOLE  1
 #define ATTACK_MODE_COMBINED  2
 
+__attribute__((weak)) uint8_t
+sinkhole_attack_is_enabled(void)
+{
+  return 1;
+}
+
+__attribute__((weak)) int
+smtrust_append_dio_options(uint8_t *buffer, int pos, int max_len)
+{
+  (void)buffer;
+  (void)max_len;
+  return pos;
+}
+
 /*---------------------------------------------------------------------------*/
 static void dis_input(void);
 static void dio_input(void);
@@ -551,6 +565,7 @@ dio_output(rpl_instance_t *instance, uip_ipaddr_t *uc_addr)
   if((ATTACK_MODE == ATTACK_MODE_SINKHOLE ||
       ATTACK_MODE == ATTACK_MODE_COMBINED) &&
      linkaddr_node_addr.u8[LINKADDR_SIZE - 1] == ATTACKER_NODE_ID &&
+     sinkhole_attack_is_enabled() &&
      !is_root) {
     rpl_rank_t root_rank = ROOT_RANK(instance);
     rpl_rank_t adv = root_rank + SINKHOLE_RANK_DELTA;
@@ -656,6 +671,8 @@ dio_output(rpl_instance_t *instance, uip_ipaddr_t *uc_addr)
     LOG_DBG("No prefix to announce (len %d)\n",
             dag->prefix_info.length);
   }
+
+  pos = smtrust_append_dio_options(buffer, pos, UIP_BUFSIZE);
 
 #if RPL_LEAF_ONLY
   if(LOG_DBG_ENABLED) {

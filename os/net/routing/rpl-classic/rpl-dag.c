@@ -87,6 +87,11 @@ rpl_should_log(void)
 #ifdef RPL_CALLBACK_PARENT_SWITCH
 void RPL_CALLBACK_PARENT_SWITCH(rpl_parent_t *old, rpl_parent_t *new);
 #endif /* RPL_CALLBACK_PARENT_SWITCH */
+__attribute__((weak)) void brpl_preferred_parent_changed(uint16_t old_id, uint16_t new_id)
+{
+  (void)old_id;
+  (void)new_id;
+}
 
 /*---------------------------------------------------------------------------*/
 extern rpl_of_t rpl_of0, rpl_mrhof;
@@ -293,6 +298,14 @@ rpl_set_preferred_parent(rpl_dag_t *dag, rpl_parent_t *p)
            (unsigned)new_rank);
   }
 #endif
+
+  {
+    const linkaddr_t *new_ll = p ? rpl_get_parent_lladdr(p) : NULL;
+    const linkaddr_t *old_ll = dag->preferred_parent ? rpl_get_parent_lladdr(dag->preferred_parent) : NULL;
+    uint16_t new_id = new_ll ? new_ll->u8[LINKADDR_SIZE - 1] : 0xFFFF;
+    uint16_t old_id = old_ll ? old_ll->u8[LINKADDR_SIZE - 1] : 0xFFFF;
+    brpl_preferred_parent_changed(old_id, new_id);
+  }
 
 #ifdef RPL_CALLBACK_PARENT_SWITCH
   RPL_CALLBACK_PARENT_SWITCH(dag->preferred_parent, p);

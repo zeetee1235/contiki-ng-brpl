@@ -36,6 +36,9 @@ static uint16_t brpl_self_id(void);
 #ifndef TRUST_LAMBDA
 #define TRUST_LAMBDA 0
 #endif
+#ifndef BRPL_CONF_CURRENT_PARENT_PENALTY_SCALE
+#define BRPL_CONF_CURRENT_PARENT_PENALTY_SCALE 1000
+#endif
 #ifdef TRUST_LAMBDA_CONF
 #undef TRUST_LAMBDA
 #define TRUST_LAMBDA TRUST_LAMBDA_CONF
@@ -50,7 +53,7 @@ static uint16_t brpl_self_id(void);
 /*---------------------------------------------------------------------------*/
 
 /* Compute Sinkhole Advertisement Trust (based on rank plausibility) */
-static uint16_t
+__attribute__((unused)) static uint16_t
 brpl_compute_trust_sink_adv(rpl_parent_t *p, rpl_dag_t *dag)
 {
 #if BRPL_CONF_TRUST_ENABLE
@@ -77,7 +80,7 @@ brpl_compute_trust_sink_adv(rpl_parent_t *p, rpl_dag_t *dag)
 }
 
 /* Compute Sinkhole Stability Trust (based on rank stability after parent selection) */
-static uint16_t
+__attribute__((unused)) static uint16_t
 brpl_compute_trust_sink_stab(rpl_parent_t *p, rpl_dag_t *dag)
 {
 #if BRPL_CONF_TRUST_ENABLE
@@ -117,8 +120,20 @@ __attribute__((weak)) uint16_t brpl_trust_get(uint16_t node_id)
   return TRUST_SCALE;
 }
 
+__attribute__((weak)) uint16_t brpl_penalty_scale_get(uint16_t node_id)
+{
+  (void)node_id;
+  return BRPL_SCALE;
+}
+
+__attribute__((weak)) int brpl_escape_mode_get(uint16_t node_id)
+{
+  (void)node_id;
+  return 0;
+}
+
 /* Update trust values for a parent with EWMA smoothing */
-static void
+__attribute__((unused)) static void
 brpl_update_trust(rpl_parent_t *p, rpl_dag_t *dag)
 {
 #if BRPL_CONF_TRUST_ENABLE
@@ -223,7 +238,11 @@ brpl_trust_clamped(rpl_parent_t *p)
   if(p == NULL) {
     return TRUST_SCALE;
   }
-  uint16_t trust = p->trust_total;
+  /* Use TA trust (gray) directly as the routing trust signal.
+   * ta_trust_get() returns 0 when blacklisted, raw EWMA trust otherwise.
+   * This ensures the trust penalty reflects actual TA assessment, not
+   * the BRPL sinkhole trust which stays ~1000 for grayhole attackers. */
+  uint16_t trust = brpl_trust_get(brpl_parent_id(p));
   if(trust < TRUST_MIN) {
     trust = TRUST_MIN;
   }
@@ -243,27 +262,25 @@ brpl_apply_trust_penalty(int32_t weight, rpl_parent_t *p)
   uint16_t trust = brpl_trust_clamped(p);
   uint16_t distrust = TRUST_SCALE - trust;
   
-  /* Apply penalty using gamma exponent and lambda weight:
-   * BP^trust = BP * (T^gamma) / (1 + lambda * (1-T)^gamma) */
+  /* Additive penalty: increase weight (cost) for distrusted nodes.
+   * In BRPL, lower weight = better parent, so we ADD a positive penalty
+   * for low-trust nodes to make them less attractive.
+   * penalty = lambda * distrust / TRUST_SCALE
+   * trusted  (distrust=0)              -> penalty=0 (no change)
+   * blacklisted (distrust=TRUST_SCALE-TRUST_MIN) -> large positive addend */
   uint16_t lambda = BRPL_CONF_TRUST_LAMBDA_PENALTY; /* scaled by 1000 */
-  
-#if TRUST_PENALTY_GAMMA >= 2
-  /* For gamma = 2: T^2 and (1-T)^2 */
-  int64_t num = (int64_t)trust * trust;
-  int64_t distrust_sq = (int64_t)distrust * distrust;
-  int64_t den = (int64_t)TRUST_SCALE * TRUST_SCALE
-                + ((int64_t)lambda * distrust_sq) / TRUST_SCALE;
-#else
-  /* For gamma = 1: linear */
-  int64_t num = (int64_t)trust;
-  int64_t den = (int64_t)TRUST_SCALE
-                + ((int64_t)lambda * distrust) / TRUST_SCALE;
-#endif
-  
-  if(den <= 0) {
-    return weight;
+  int32_t penalty = (int32_t)(((uint32_t)lambda * distrust) / TRUST_SCALE);
+  uint16_t penalty_scale = brpl_penalty_scale_get(brpl_parent_id(p));
+  penalty = (int32_t)(((int64_t)penalty * penalty_scale) / BRPL_SCALE);
+
+  /* Give the current preferred parent a small hysteresis discount so
+   * mild trust noise does not trigger avoidable parent churn. */
+  if(p != NULL && p->dag != NULL && p->dag->preferred_parent == p
+     && !brpl_escape_mode_get(brpl_parent_id(p))) {
+    penalty = (int32_t)(((int64_t)penalty * BRPL_CONF_CURRENT_PARENT_PENALTY_SCALE)
+                        / BRPL_SCALE);
   }
-  return (int32_t)(((int64_t)weight * num) / den);
+  return weight + penalty;
 }
 
 static uint16_t
