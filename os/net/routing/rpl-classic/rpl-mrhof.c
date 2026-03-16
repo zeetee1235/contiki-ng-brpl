@@ -99,6 +99,31 @@
 /* Reject parents that have a higher path cost than the following. */
 #define MAX_PATH_COST      32768   /* Eq path ETX of 256 */
 
+/* SMTrust can override this to reject suspicious / low-trust parents
+ * while leaving plain MRHOF behavior unchanged for other protocols. */
+__attribute__((weak)) int
+smtrust_is_parent_candidate(uint16_t node_id)
+{
+  (void)node_id;
+  return 1;
+}
+
+__attribute__((weak)) int
+smtrust_compare_parents(uint16_t p1_id, uint16_t p2_id,
+                        uint16_t p1_rank, uint16_t p2_rank,
+                        uint16_t self_rank,
+                        uint16_t p1_metric, uint16_t p2_metric)
+{
+  (void)p1_id;
+  (void)p2_id;
+  (void)p1_rank;
+  (void)p2_rank;
+  (void)self_rank;
+  (void)p1_metric;
+  (void)p2_metric;
+  return 0;
+}
+
 /*---------------------------------------------------------------------------*/
 static void
 reset(rpl_dag_t *dag)
@@ -192,8 +217,17 @@ parent_is_acceptable(rpl_parent_t *p)
 {
   uint16_t link_metric = parent_link_metric(p);
   uint16_t path_cost = parent_path_cost(p);
+  const linkaddr_t *lladdr = rpl_get_parent_lladdr(p);
+  uint16_t node_id = 0;
+
+  if(lladdr != NULL) {
+    node_id = lladdr->u8[LINKADDR_SIZE - 1];
+  }
+
   /* Exclude links with too high link metrics or path cost. (RFC6719, 3.2.2) */
-  return link_metric <= MAX_LINK_METRIC && path_cost <= MAX_PATH_COST;
+  return link_metric <= MAX_LINK_METRIC
+      && path_cost <= MAX_PATH_COST
+      && smtrust_is_parent_candidate(node_id);
 }
 /*---------------------------------------------------------------------------*/
 static int
@@ -212,20 +246,50 @@ best_parent(rpl_parent_t *p1, rpl_parent_t *p2)
   uint16_t p2_cost;
   int p1_is_acceptable;
   int p2_is_acceptable;
+  int p1_has_usable_link;
+  int p2_has_usable_link;
 
   p1_is_acceptable = p1 != NULL && parent_is_acceptable(p1);
   p2_is_acceptable = p2 != NULL && parent_is_acceptable(p2);
+  p1_has_usable_link = p1 != NULL && parent_has_usable_link(p1)
+                    && parent_path_cost(p1) <= MAX_PATH_COST;
+  p2_has_usable_link = p2 != NULL && parent_has_usable_link(p2)
+                    && parent_path_cost(p2) <= MAX_PATH_COST;
 
   if(!p1_is_acceptable) {
-    return p2_is_acceptable ? p2 : NULL;
+    if(p2_is_acceptable) {
+      return p2;
+    }
+    return p2_has_usable_link ? p2 : NULL;
   }
   if(!p2_is_acceptable) {
-    return p1_is_acceptable ? p1 : NULL;
+    if(p1_is_acceptable) {
+      return p1;
+    }
+    return p1_has_usable_link ? p1 : NULL;
   }
 
   dag = p1->dag; /* Both parents are in the same DAG. */
   p1_cost = parent_path_cost(p1);
   p2_cost = parent_path_cost(p2);
+
+  {
+    const linkaddr_t *ll1 = rpl_get_parent_lladdr(p1);
+    const linkaddr_t *ll2 = rpl_get_parent_lladdr(p2);
+    uint16_t p1_id = ll1 != NULL ? ll1->u8[LINKADDR_SIZE - 1] : 0xffff;
+    uint16_t p2_id = ll2 != NULL ? ll2->u8[LINKADDR_SIZE - 1] : 0xffff;
+    uint16_t self_rank = dag != NULL ? dag->rank : RPL_INFINITE_RANK;
+    int trust_choice = smtrust_compare_parents(p1_id, p2_id,
+                                               p1->rank, p2->rank,
+                                               self_rank,
+                                               p1_cost, p2_cost);
+    if(trust_choice < 0) {
+      return p1;
+    }
+    if(trust_choice > 0) {
+      return p2;
+    }
+  }
 
   /* Maintain the stability of the preferred parent in case of similar ranks. */
   if(p1 == dag->preferred_parent || p2 == dag->preferred_parent) {
