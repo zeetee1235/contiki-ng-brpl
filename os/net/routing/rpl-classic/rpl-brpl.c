@@ -266,7 +266,7 @@ brpl_trust_clamped(rpl_parent_t *p)
   }
   /* Use TA trust (gray) directly as the routing trust signal.
    * ta_trust_get() returns 0 when blacklisted, raw EWMA trust otherwise.
-   * This ensures the trust penalty reflects actual TA assessment, not
+   * This ensures the trust penalty refcontiki-ng-brpllects actual TA assessment, not
    * the BRPL sinkhole trust which stays ~1000 for grayhole attackers. */
   uint16_t trust = brpl_trust_get(brpl_parent_id(p));
   if(trust < TRUST_MIN) {
@@ -471,8 +471,11 @@ brpl_update_state(rpl_dag_t *dag)
     dag->brpl_last_beta_update = now;
   }
 
-  uint16_t theta_part = (uint16_t)((BRPL_SCALE - dag->brpl_beta) * (BRPL_SCALE - rho) / BRPL_SCALE);
-  dag->brpl_theta = (uint16_t)(dag->brpl_beta + theta_part);
+  /*
+   * QuickTheta: increase BP weight as local backlog grows.
+   * theta = Qx / Qmax, scaled by BRPL_SCALE.
+   */
+  dag->brpl_theta = rho;
 
   dag->brpl_pmax = 1;
   for(rpl_parent_t *p = nbr_table_head(rpl_parents); p != NULL; p = nbr_table_next(rpl_parents, p)) {
@@ -525,10 +528,7 @@ brpl_weight_base(rpl_parent_t *p)
   uint16_t qy = brpl_neighbor_queue(p, dag, qx, qmax);
   int32_t delta_q = (int32_t)qx - (int32_t)qy;
 
-  uint32_t p_tilde = (uint32_t)rpl_get_parent_link_metric(p) + (uint32_t)p->rank;
-  uint16_t p_norm = brpl_scale_ratio(p_tilde, dag->brpl_pmax);
-  int32_t dq_norm = qmax > 0 ? (delta_q * BRPL_SCALE) / (int32_t)qmax : 0;
-
+  int32_t etx = (int32_t)rpl_get_parent_link_metric(p);
   int32_t theta = dag->brpl_theta;
   int32_t weight = (theta * (int32_t)p_norm - (BRPL_SCALE - theta) * dq_norm) / BRPL_SCALE;
 

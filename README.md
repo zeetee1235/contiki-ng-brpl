@@ -56,4 +56,4 @@ the terms of the [3-clause BSD license](LICENSE.md).
 
 This implementation is used as the routing substrate for the following research project:
 
-- https://github.com/zeetee1235/rpl-structural-attack-observability
+- https://github.com/zeetee1235/TA-BRPL
