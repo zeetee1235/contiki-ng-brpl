@@ -24,6 +24,16 @@ NBR_TABLE_DECLARE(rpl_parents);
 static uint16_t brpl_parent_id(rpl_parent_t *p);
 static uint16_t brpl_self_id(void);
 
+#ifndef BRPL_CONF_SWITCH_MARGIN_PPM
+#define BRPL_CONF_SWITCH_MARGIN_PPM 120
+#endif
+#ifndef BRPL_CONF_SWITCH_MARGIN_ABS
+#define BRPL_CONF_SWITCH_MARGIN_ABS 50
+#endif
+#ifndef BRPL_CONF_PARENT_DWELL_SECONDS
+#define BRPL_CONF_PARENT_DWELL_SECONDS 120
+#endif
+
 #ifndef TRUST_SCALE
 #define TRUST_SCALE 1000
 #endif
@@ -130,6 +140,22 @@ __attribute__((weak)) int brpl_escape_mode_get(uint16_t node_id)
 {
   (void)node_id;
   return 0;
+}
+
+/* Optional hard-exclude hook from external trust engine.
+ * Default allows all parents. */
+__attribute__((weak)) int brpl_trust_parent_allowed(uint16_t node_id)
+{
+  (void)node_id;
+  return 1;
+}
+
+/* Optional validation-gated penalty scale from external trust engine.
+ * 1000 means neutral (no extra boost). */
+__attribute__((weak)) uint16_t brpl_validation_penalty_scale_get(uint16_t node_id)
+{
+  (void)node_id;
+  return 1000;
 }
 
 /* Update trust values for a parent with EWMA smoothing */
@@ -259,6 +285,7 @@ brpl_trust_clamped(rpl_parent_t *p)
 static int32_t
 brpl_apply_trust_penalty(int32_t weight, rpl_parent_t *p)
 {
+  uint16_t node_id = brpl_parent_id(p);
   uint16_t trust = brpl_trust_clamped(p);
   uint16_t distrust = TRUST_SCALE - trust;
   
@@ -269,18 +296,64 @@ brpl_apply_trust_penalty(int32_t weight, rpl_parent_t *p)
    * trusted  (distrust=0)              -> penalty=0 (no change)
    * blacklisted (distrust=TRUST_SCALE-TRUST_MIN) -> large positive addend */
   uint16_t lambda = BRPL_CONF_TRUST_LAMBDA_PENALTY; /* scaled by 1000 */
-  int32_t penalty = (int32_t)(((uint32_t)lambda * distrust) / TRUST_SCALE);
-  uint16_t penalty_scale = brpl_penalty_scale_get(brpl_parent_id(p));
-  penalty = (int32_t)(((int64_t)penalty * penalty_scale) / BRPL_SCALE);
-
-  /* Give the current preferred parent a small hysteresis discount so
-   * mild trust noise does not trigger avoidable parent churn. */
-  if(p != NULL && p->dag != NULL && p->dag->preferred_parent == p
-     && !brpl_escape_mode_get(brpl_parent_id(p))) {
-    penalty = (int32_t)(((int64_t)penalty * BRPL_CONF_CURRENT_PARENT_PENALTY_SCALE)
-                        / BRPL_SCALE);
+#if TRUST_PENALTY_GAMMA >= 2
+  /* For gamma = 2: T^2 and (1-T)^2 */
+  int64_t num = (int64_t)trust * trust;
+  int64_t distrust_sq = (int64_t)distrust * distrust;
+  int64_t den = (int64_t)TRUST_SCALE * TRUST_SCALE
+                + ((int64_t)lambda * distrust_sq) / TRUST_SCALE;
+#else
+  /* For gamma = 1: linear */
+  int64_t num = (int64_t)trust;
+  int64_t den = (int64_t)TRUST_SCALE
+                + ((int64_t)lambda * distrust) / TRUST_SCALE;
+#endif
+  
+  int32_t base_weight = weight;
+  if(den > 0) {
+    base_weight = (int32_t)(((int64_t)weight * num) / den);
   }
-  return weight + penalty;
+
+  /* Apply extra cost boost only when validation model marks a parent
+   * as suspect/penalized. Default scale=1000 keeps legacy behavior. */
+  uint16_t vscale = brpl_validation_penalty_scale_get(node_id);
+  if(vscale == 0) {
+    vscale = 1000;
+  }
+
+  int32_t merged_weight = (int32_t)(((int64_t)base_weight * vscale) / 1000);
+  uint16_t pscale = brpl_penalty_scale_get(node_id);
+  if(pscale == 0) {
+    pscale = BRPL_SCALE;
+  }
+  merged_weight = (int32_t)(((int64_t)merged_weight * pscale) / BRPL_SCALE);
+
+  /* Keep current parent slightly sticky unless trust engine enables escape. */
+  if(p != NULL && p->dag != NULL && p->dag->preferred_parent == p
+     && !brpl_escape_mode_get(node_id)) {
+    merged_weight = (int32_t)(((int64_t)merged_weight * BRPL_CONF_CURRENT_PARENT_PENALTY_SCALE)
+                              / BRPL_SCALE);
+  }
+  return merged_weight;
+}
+
+static int
+brpl_switch_margin_allows(int32_t preferred_w, int32_t challenger_w)
+{
+  if(challenger_w >= preferred_w) {
+    return 0;
+  }
+
+  int32_t gain = preferred_w - challenger_w;
+  if(gain >= BRPL_CONF_SWITCH_MARGIN_ABS) {
+    return 1;
+  }
+
+  int32_t base = preferred_w > 0 ? preferred_w : 1;
+  int64_t lhs = (int64_t)gain * BRPL_SCALE;
+  int64_t rhs = (int64_t)base * BRPL_CONF_SWITCH_MARGIN_PPM;
+
+  return lhs >= rhs;
 }
 
 static uint16_t
@@ -295,6 +368,44 @@ brpl_scale_ratio(uint32_t num, uint32_t den)
   }
   return (uint16_t)val;
 }
+
+static uint16_t brpl_last_preferred_id = 0xFFFF;
+static clock_time_t brpl_last_preferred_switch_at;
+
+static void
+brpl_track_preferred_parent(rpl_dag_t *dag)
+{
+  uint16_t current_pref_id = 0xFFFF;
+  clock_time_t now = clock_time();
+
+  if(dag != NULL && dag->preferred_parent != NULL) {
+    current_pref_id = brpl_parent_id(dag->preferred_parent);
+  }
+
+  if(brpl_last_preferred_switch_at == 0) {
+    brpl_last_preferred_switch_at = now;
+    brpl_last_preferred_id = current_pref_id;
+    return;
+  }
+
+  if(current_pref_id != brpl_last_preferred_id) {
+    brpl_last_preferred_id = current_pref_id;
+    brpl_last_preferred_switch_at = now;
+  }
+}
+
+static int
+brpl_dwell_blocks_switch(int preferred_allowed)
+{
+  clock_time_t dwell = (clock_time_t)BRPL_CONF_PARENT_DWELL_SECONDS * CLOCK_SECOND;
+
+  if(dwell == 0 || !preferred_allowed || brpl_last_preferred_switch_at == 0) {
+    return 0;
+  }
+  return (clock_time() - brpl_last_preferred_switch_at) < dwell;
+}
+
+
 
 static uint16_t
 brpl_symmetric_diff(const linkaddr_t *prev, uint16_t prev_count,
@@ -455,11 +566,57 @@ brpl_best_parent(rpl_parent_t *p1, rpl_parent_t *p2)
   if(p2 == NULL) {
     return p1;
   }
+  uint16_t id1 = brpl_parent_id(p1);
+  uint16_t id2 = brpl_parent_id(p2);
+  int allow1 = brpl_trust_parent_allowed(id1);
+  int allow2 = brpl_trust_parent_allowed(id2);
+
+  if(allow1 && !allow2) {
+    return p1;
+  }
+  if(!allow1 && allow2) {
+    return p2;
+  }
+
   int32_t w1_base = brpl_weight_base(p1);
   int32_t w2_base = brpl_weight_base(p2);
+
+  /* Fallback policy: if both are hard-excluded, keep one lowest-cost
+   * candidate to avoid dead-end routing. */
+  if(!allow1 && !allow2) {
+    return (w2_base < w1_base) ? p2 : p1;
+  }
+
   int32_t w1 = brpl_apply_trust_penalty(w1_base, p1);
   int32_t w2 = brpl_apply_trust_penalty(w2_base, p2);
   rpl_parent_t *best = (w2 < w1) ? p2 : p1;
+  rpl_dag_t *dag = p1->dag;
+  rpl_parent_t *preferred = dag != NULL ? dag->preferred_parent : NULL;
+  int preferred_allowed = 0;
+  int dwell_blocked = 0;
+
+  brpl_track_preferred_parent(dag);
+  if(preferred == p1) {
+    preferred_allowed = allow1;
+  } else if(preferred == p2) {
+    preferred_allowed = allow2;
+  }
+
+  /* Hysteresis gate: if we are about to switch away from the currently
+   * preferred parent, require a meaningful score improvement. */
+  if(preferred != NULL && best != preferred &&
+     (preferred == p1 || preferred == p2)) {
+    int32_t preferred_w = (preferred == p1) ? w1 : w2;
+    int32_t challenger_w = (best == p1) ? w1 : w2;
+    dwell_blocked = brpl_dwell_blocks_switch(preferred_allowed);
+    if(dwell_blocked) {
+      best = preferred;
+    } else {
+      if(!brpl_switch_margin_allows(preferred_w, challenger_w)) {
+        best = preferred;
+      }
+    }
+  }
 #if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
   if(brpl_should_log()) {
     uint16_t t1 = brpl_trust_clamped(p1);
@@ -501,6 +658,21 @@ brpl_best_parent(rpl_parent_t *p1, rpl_parent_t *p2)
            (unsigned)brpl_parent_id(p2),
            (long)w2,
            (unsigned)brpl_parent_id(best));
+    if(preferred != NULL && best == preferred && (preferred == p1 || preferred == p2) &&
+       dwell_blocked) {
+      printf("CSV,BRPL_DWELL_GATE,%u,%u,%lu\n",
+             (unsigned)brpl_self_id(),
+             (unsigned)brpl_parent_id(preferred),
+             (unsigned long)clock_time());
+    }
+    if(preferred != NULL && (preferred == p1 || preferred == p2) && best != preferred) {
+      printf("CSV,BRPL_SWITCH_GATE,%u,%u,%ld,%u,%ld\n",
+             (unsigned)brpl_self_id(),
+             (unsigned)brpl_parent_id(preferred),
+             (long)((preferred == p1) ? w1 : w2),
+             (unsigned)brpl_parent_id(best),
+             (long)((best == p1) ? w1 : w2));
+    }
   }
 #endif
   return best;
