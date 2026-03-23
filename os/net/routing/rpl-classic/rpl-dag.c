@@ -48,6 +48,7 @@
 #include "net/ipv6/uip.h"
 #include "net/ipv6/uip-nd6.h"
 #include "net/ipv6/uip-ds6-nbr.h"
+#include "net/linkaddr.h"
 #include "net/nbr-table.h"
 #include "net/ipv6/multicast/uip-mcast6.h"
 #include "lib/list.h"
@@ -55,16 +56,42 @@
 #include "sys/ctimer.h"
 #include "sys/log.h"
 
+#include <stdio.h>
 #include <limits.h>
 #include <string.h>
 
 #define LOG_MODULE "RPL"
 #define LOG_LEVEL LOG_LEVEL_RPL
 
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+#if defined(CSV_LOG_SAMPLE_RATE)
+#define RPL_LOG_SAMPLE_RATE CSV_LOG_SAMPLE_RATE
+#else
+#define RPL_LOG_SAMPLE_RATE 1
+#endif
+
+static uint32_t rpl_log_counter;
+
+static int
+rpl_should_log(void)
+{
+  rpl_log_counter++;
+  if(RPL_LOG_SAMPLE_RATE == 0) {
+    return 0;
+  }
+  return (rpl_log_counter % RPL_LOG_SAMPLE_RATE) == 0;
+}
+#endif
+
 /* A configurable function called after every RPL parent switch. */
 #ifdef RPL_CALLBACK_PARENT_SWITCH
 void RPL_CALLBACK_PARENT_SWITCH(rpl_parent_t *old, rpl_parent_t *new);
 #endif /* RPL_CALLBACK_PARENT_SWITCH */
+__attribute__((weak)) void brpl_preferred_parent_changed(uint16_t old_id, uint16_t new_id)
+{
+  (void)old_id;
+  (void)new_id;
+}
 
 /*---------------------------------------------------------------------------*/
 extern rpl_of_t rpl_of0, rpl_mrhof;
@@ -256,6 +283,30 @@ rpl_set_preferred_parent(rpl_dag_t *dag, rpl_parent_t *p)
   }
   LOG_INFO_("\n");
 
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+  if(rpl_should_log()) {
+    const linkaddr_t *new_ll = p ? rpl_get_parent_lladdr(p) : NULL;
+    const linkaddr_t *old_ll = dag->preferred_parent ? rpl_get_parent_lladdr(dag->preferred_parent) : NULL;
+    uint16_t self_id = (uint16_t)linkaddr_node_addr.u8[LINKADDR_SIZE - 1];
+    uint16_t new_id = new_ll ? new_ll->u8[LINKADDR_SIZE - 1] : 0xFFFF;
+    uint16_t old_id = old_ll ? old_ll->u8[LINKADDR_SIZE - 1] : 0xFFFF;
+    uint16_t new_rank = p ? p->rank : RPL_INFINITE_RANK;
+    printf("CSV,RPL_PARENT,%u,%u,%u,%u\n",
+           (unsigned)self_id,
+           (unsigned)new_id,
+           (unsigned)old_id,
+           (unsigned)new_rank);
+  }
+#endif
+
+  {
+    const linkaddr_t *new_ll = p ? rpl_get_parent_lladdr(p) : NULL;
+    const linkaddr_t *old_ll = dag->preferred_parent ? rpl_get_parent_lladdr(dag->preferred_parent) : NULL;
+    uint16_t new_id = new_ll ? new_ll->u8[LINKADDR_SIZE - 1] : 0xFFFF;
+    uint16_t old_id = old_ll ? old_ll->u8[LINKADDR_SIZE - 1] : 0xFFFF;
+    brpl_preferred_parent_changed(old_id, new_id);
+  }
+
 #ifdef RPL_CALLBACK_PARENT_SWITCH
   RPL_CALLBACK_PARENT_SWITCH(dag->preferred_parent, p);
 #endif /* RPL_CALLBACK_PARENT_SWITCH */
@@ -372,6 +423,9 @@ rpl_set_root(uint8_t instance_id, uip_ipaddr_t *dag_id)
     for(i = 0; i < RPL_MAX_DAG_PER_INSTANCE; ++i) {
       dag = &instance->dag_table[i];
       if(dag->used) {
+        if(dag->instance == NULL) {
+          continue;
+        }
         if(uip_ipaddr_cmp(&dag->dag_id, dag_id)) {
           version = dag->version;
           RPL_LOLLIPOP_INCREMENT(version);
@@ -437,7 +491,9 @@ rpl_set_root(uint8_t instance_id, uip_ipaddr_t *dag_id)
 
   instance->current_dag = dag;
   instance->dtsn_out = RPL_LOLLIPOP_INIT;
-  instance->of->update_metric_container(instance);
+  if(instance->of->update_metric_container) {
+    instance->of->update_metric_container(instance);
+  }
   default_instance = instance;
 
   LOG_INFO("Node set to be a DAG root with DAG ID ");
@@ -721,6 +777,17 @@ rpl_add_parent(rpl_dag_t *dag, rpl_dio_t *dio, uip_ipaddr_t *addr)
 #if RPL_WITH_MC
       memcpy(&p->mc, &dio->mc, sizeof(p->mc));
 #endif /* RPL_WITH_MC */
+#if BRPL_CONF_ENABLE && BRPL_CONF_TRUST_ENABLE
+      /* Initialize trust values for new parent */
+      p->trust_gray = 1000;
+      p->trust_sink_adv = 1000;
+      p->trust_sink_stab = 1000;
+      p->trust_total = 1000;
+      p->last_rank = dio->rank;
+      p->last_rank_update = clock_seconds();
+      p->packets_sent = 0;
+      p->packets_dropped = 0;
+#endif
     }
   }
 
@@ -822,7 +889,9 @@ rpl_select_dag(rpl_instance_t *instance, rpl_parent_t *p)
     instance->current_dag = best_dag;
   }
 
-  instance->of->update_metric_container(instance);
+  if(instance->of->update_metric_container) {
+    instance->of->update_metric_container(instance);
+  }
   /* Update the DAG rank. */
   best_dag->rank = rpl_rank_via_parent(best_dag->preferred_parent);
   if(last_parent == NULL || best_dag->rank < best_dag->min_rank) {
@@ -1036,10 +1105,14 @@ rpl_get_any_dag_with_parent(bool requires_parent)
   int i;
 
   for(i = 0; i < RPL_MAX_INSTANCES; ++i) {
-    if(instance_table[i].used
-       && instance_table[i].current_dag->joined
-       && (!requires_parent || instance_table[i].current_dag->preferred_parent != NULL)) {
-      return instance_table[i].current_dag;
+    if(instance_table[i].used) {
+      rpl_dag_t *dag = instance_table[i].current_dag;
+      if(dag == NULL) {
+        continue;
+      }
+      if(dag->joined && (!requires_parent || dag->preferred_parent != NULL)) {
+        return dag;
+      }
     }
   }
   return NULL;
@@ -1198,7 +1271,9 @@ rpl_join_instance(uip_ipaddr_t *from, rpl_dio_t *dio)
   memcpy(&dag->prefix_info, &dio->prefix_info, sizeof(rpl_prefix_t));
 
   rpl_set_preferred_parent(dag, p);
-  instance->of->update_metric_container(instance);
+  if(instance->of->update_metric_container) {
+    instance->of->update_metric_container(instance);
+  }
   dag->rank = rpl_rank_via_parent(p);
   /* So far this is the lowest rank we are aware of. */
   dag->min_rank = dag->rank;
@@ -1270,6 +1345,26 @@ rpl_add_dag(uip_ipaddr_t *from, rpl_dio_t *dio)
   } else {
     p->brpl_queue_valid = 0;
   }
+  
+#if BRPL_CONF_TRUST_ENABLE
+  /* Update trust metrics when receiving DIO */
+  brpl_update_parent_trust(p, dag);
+#endif
+
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+  if(rpl_should_log()) {
+    const linkaddr_t *lladdr = rpl_get_parent_lladdr(p);
+    uint16_t parent_id = lladdr ? lladdr->u8[LINKADDR_SIZE - 1] : 0xFFFF;
+    uint16_t self_id = (uint16_t)linkaddr_node_addr.u8[LINKADDR_SIZE - 1];
+    printf("CSV,BRPL_DIO,%u,%u,%u,%u,%u,%u\n",
+           (unsigned)self_id,
+           (unsigned)parent_id,
+           (unsigned)p->rank,
+           (unsigned)p->brpl_queue,
+           (unsigned)p->brpl_queue_max,
+           (unsigned)p->brpl_queue_valid);
+  }
+#endif
 #endif
 
   /* Determine the objective function by using the objective code

