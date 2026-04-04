@@ -3,6 +3,7 @@
 #include "net/routing/rpl-classic/rpl-conf.h"
 #include "net/routing/rpl-classic/rpl-private.h"
 #include "net/routing/rpl-classic/brpl-queue.h"
+#include "net/routing/rpl-classic/brpl-switch-policy.h"
 #include "net/ipv6/uip-ds6.h"
 #include "net/ipv6/uip-ds6-nbr.h"
 #include "net/nbr-table.h"
@@ -140,6 +141,49 @@ __attribute__((weak)) int brpl_escape_mode_get(uint16_t node_id)
 {
   (void)node_id;
   return 0;
+}
+
+/* Optional quality gate for switch challenger.
+ * Default: allow all candidates. */
+__attribute__((weak)) int brpl_switch_candidate_quality_ok(uint16_t node_id)
+{
+  (void)node_id;
+  return 1;
+}
+
+/* Optional loss-adaptive extra margin for switching.
+ * Default: no extra margin. */
+__attribute__((weak)) uint16_t brpl_switch_extra_margin_get(uint16_t preferred_id,
+                                                            uint16_t challenger_id)
+{
+  (void)preferred_id;
+  (void)challenger_id;
+  return 0;
+}
+
+/* Unified switch policy hook.
+ * Default behavior composes legacy quality/margin hooks to preserve
+ * backward compatibility with existing trust engines. */
+__attribute__((weak)) int brpl_switch_policy_get(uint16_t preferred_id,
+                                                 uint16_t challenger_id,
+                                                 int32_t preferred_weight,
+                                                 int32_t challenger_weight,
+                                                 uint8_t preferred_allowed,
+                                                 brpl_switch_policy_decision_t *out)
+{
+  (void)preferred_weight;
+  (void)challenger_weight;
+  (void)preferred_allowed;
+
+  if(out == NULL) {
+    return 0;
+  }
+
+  out->extra_margin_abs = brpl_switch_extra_margin_get(preferred_id, challenger_id);
+  out->block_switch = brpl_switch_candidate_quality_ok(challenger_id) ? 0 : 1;
+  out->bypass_dwell = 0;
+  out->reason_code = out->block_switch ? 1 : 0;
+  return 1;
 }
 
 /* Optional hard-exclude hook from external trust engine.
@@ -338,14 +382,15 @@ brpl_apply_trust_penalty(int32_t weight, rpl_parent_t *p)
 }
 
 static int
-brpl_switch_margin_allows(int32_t preferred_w, int32_t challenger_w)
+brpl_switch_margin_allows(int32_t preferred_w, int32_t challenger_w, uint16_t extra_margin_abs)
 {
   if(challenger_w >= preferred_w) {
     return 0;
   }
 
   int32_t gain = preferred_w - challenger_w;
-  if(gain >= BRPL_CONF_SWITCH_MARGIN_ABS) {
+  int32_t required_abs = BRPL_CONF_SWITCH_MARGIN_ABS + (int32_t)extra_margin_abs;
+  if(gain >= required_abs) {
     return 1;
   }
 
@@ -608,14 +653,52 @@ brpl_best_parent(rpl_parent_t *p1, rpl_parent_t *p2)
      (preferred == p1 || preferred == p2)) {
     int32_t preferred_w = (preferred == p1) ? w1 : w2;
     int32_t challenger_w = (best == p1) ? w1 : w2;
-    dwell_blocked = brpl_dwell_blocks_switch(preferred_allowed);
-    if(dwell_blocked) {
+    uint16_t preferred_id = brpl_parent_id(preferred);
+    uint16_t challenger_id = brpl_parent_id(best);
+    brpl_switch_policy_decision_t policy = {0, 0, 0, 0};
+    int quality_ok;
+    int margin_ok;
+
+    if(!brpl_switch_policy_get(preferred_id, challenger_id,
+                               preferred_w, challenger_w,
+                               (uint8_t)preferred_allowed, &policy)) {
+      policy.extra_margin_abs = brpl_switch_extra_margin_get(preferred_id, challenger_id);
+      policy.block_switch = brpl_switch_candidate_quality_ok(challenger_id) ? 0 : 1;
+      policy.bypass_dwell = 0;
+      policy.reason_code = policy.block_switch ? 1 : 0;
+    }
+
+    quality_ok = policy.block_switch ? 0 : 1;
+    dwell_blocked = policy.bypass_dwell ? 0 : brpl_dwell_blocks_switch(preferred_allowed);
+    margin_ok = brpl_switch_margin_allows(preferred_w, challenger_w, policy.extra_margin_abs);
+
+    if(policy.block_switch) {
+      best = preferred;
+    } else if(dwell_blocked) {
       best = preferred;
     } else {
-      if(!brpl_switch_margin_allows(preferred_w, challenger_w)) {
+      if(!margin_ok) {
         best = preferred;
       }
     }
+#if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
+    if(brpl_should_log()) {
+      printf("CSV,BRPL_SWITCH_GATE,%u,%u,%ld,%u,%ld,%u,%u,%u,%lu,%u,%u,%u,%u\n",
+             (unsigned)brpl_self_id(),
+             (unsigned)preferred_id,
+             (long)preferred_w,
+             (unsigned)challenger_id,
+             (long)challenger_w,
+             (unsigned)policy.extra_margin_abs,
+             (unsigned)quality_ok,
+             (unsigned)dwell_blocked,
+             (unsigned long)clock_time(),
+             (unsigned)margin_ok,
+             (unsigned)policy.block_switch,
+             (unsigned)policy.bypass_dwell,
+             (unsigned)policy.reason_code);
+    }
+#endif
   }
 #if defined(CSV_VERBOSE_LOGGING) && CSV_VERBOSE_LOGGING
   if(brpl_should_log()) {
@@ -664,14 +747,6 @@ brpl_best_parent(rpl_parent_t *p1, rpl_parent_t *p2)
              (unsigned)brpl_self_id(),
              (unsigned)brpl_parent_id(preferred),
              (unsigned long)clock_time());
-    }
-    if(preferred != NULL && (preferred == p1 || preferred == p2) && best != preferred) {
-      printf("CSV,BRPL_SWITCH_GATE,%u,%u,%ld,%u,%ld\n",
-             (unsigned)brpl_self_id(),
-             (unsigned)brpl_parent_id(preferred),
-             (long)((preferred == p1) ? w1 : w2),
-             (unsigned)brpl_parent_id(best),
-             (long)((best == p1) ? w1 : w2));
     }
   }
 #endif
